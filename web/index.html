@@ -1,4 +1,102 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>临床试验随机化</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>临床试验随机分配与盲法</h1><div class="panel"><select id="user"><option>site1</option><option>site2</option><option>coord</option><option>monitor1</option><option>monitor2</option></select><input id="trial" value="1"><button onclick="load()">查看试验摘要</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/trials/${trial.value}/summary`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<style>
+body{font:16px system-ui;max-width:1080px;margin:32px auto;padding:0 16px}
+select,button,input{padding:8px;margin:4px}
+pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}
+.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin-bottom:16px}
+table{border-collapse:collapse;width:100%}td,th{border:1px solid #ccc;padding:6px 8px;text-align:left;font-size:14px}
+h2{font-size:18px;margin:4px 0 12px}
+.st-active{color:#087f23;font-weight:600}.st-pending{color:#b26a00;font-weight:600}
+.st-rejected{color:#b00020}.st-superseded{color:#666}
+</style></head>
+<body>
+<h1>临床试验随机分配与盲法</h1>
+<div class="panel">
+  用户 <select id="user"><option>site1</option><option>site2</option><option>coord</option><option>monitor1</option><option>monitor2</option><option>stat1</option><option>stat2</option></select>
+  试验ID <input id="trial" value="1" size="4">
+  <button onclick="loadAll()">加载试验</button>
+  <span id="meta"></span>
+</div>
+<div class="panel"><h2>方案版本沿革</h2><div id="versions"></div></div>
+<div class="panel"><h2>受试者（登记版本）</h2><div id="parts"></div></div>
+<div class="panel"><h2>方案修订</h2>
+  <div>
+    <input id="amReason" placeholder="修订原因（至少8字）" size="22">
+    <input id="amVersion" placeholder="新版本号 如 v2.0" size="14">
+    <input id="amArms" placeholder="分组,逗号分隔(可空)" size="18">
+    <input id="amStrata" placeholder="分层因素,逗号分隔(可空)" size="18">
+    <input id="amBlock" placeholder="区组长度(可空)" size="12">
+    <input id="amSeed" placeholder="新随机种子(可空)" size="14">
+    <button onclick="submitAmendment()">提交修订（协调员）</button>
+  </div>
+  <div>
+    <input id="amId" placeholder="修订ID" size="6">
+    <button onclick="approveAmendment()">统计确认（两人先后）</button>
+    <input id="amReject" placeholder="驳回理由（至少8字）" size="20">
+    <button onclick="rejectAmendment()">驳回（统计）</button>
+  </div>
+</div>
+<pre id="out"></pre>
+<script>
+const $=id=>document.getElementById(id);
+const esc=s=>String(s??"").replace(/[&<>"]/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+const STATUS={active:"当前",superseded:"历史",pending:"待复核",rejected:"已驳回"};
+async function api(path,method="GET",body){
+  const r=await fetch(path,{method,headers:{"X-User-Id":$("user").value,"Content-Type":"application/json"},body:body?JSON.stringify(body):undefined});
+  const d=await r.json();if(!r.ok)throw new Error(d.error?d.error.message:r.status);return d;
+}
+function table(el,heads,rows){
+  $(el).innerHTML="<table><tr>"+heads.map(h=>`<th>${esc(h)}</th>`).join("")+"</tr>"
+    +rows.map(r=>"<tr>"+r.map(c=>`<td>${c}</td>`).join("")+"</tr>").join("")+"</table>";
+}
+async function loadAll(){
+  try{
+    const t=$("trial").value;
+    const s=await api(`/api/trials/${t}/summary`);
+    $("meta").textContent=`${s.trial.name}｜状态 ${s.trial.status}｜现行方案 ${s.trial.protocol_version}（第 ${s.trial.scheme_version_no} 版）`;
+    const v=await api(`/api/trials/${t}/scheme-versions`);
+    const withArms=v.items.some(x=>"arms" in x);   // 中心用户拿不到分组列
+    const heads=["#","版本","方案版本号","状态","修订原因","提交人","一审","二审","驳回人","驳回理由","登记受试者","提交时间","决定时间"];
+    if(withArms)heads.push("分组");
+    table("versions",heads,v.items.map(x=>{
+      const row=[x.id,x.version_no,esc(x.protocol_version),`<span class="st-${x.status}">${STATUS[x.status]||x.status}</span>`,
+        esc(x.reason||"-"),esc(x.submitted_by||"-"),esc(x.first_approver||"-"),esc(x.second_approver||"-"),
+        esc(x.rejected_by||"-"),esc(x.reject_reason||"-"),x.participants,esc(x.created_at),esc(x.decided_at||"-")];
+      if(withArms)row.push(esc((x.arms||[]).join(" / ")));
+      return row;
+    }));
+    const p=await api(`/api/trials/${t}/participants`);
+    table("parts",["ID","外部编号","中心","分配编号","登记版本","状态"],
+      p.items.map(x=>[x.id,esc(x.external_id),esc(x.site_id),esc(x.allocation_code),esc(x.scheme_version||"-"),esc(x.status)]));
+    $("out").textContent="";
+  }catch(e){$("out").textContent="错误："+e.message}
+}
+async function submitAmendment(){
+  try{
+    const body={reason:$("amReason").value,protocol_version:$("amVersion").value};
+    if($("amArms").value.trim())body.arms=$("amArms").value.split(",").map(s=>s.trim()).filter(Boolean);
+    if($("amStrata").value.trim())body.strata_factors=$("amStrata").value.split(",").map(s=>s.trim()).filter(Boolean);
+    if($("amBlock").value.trim())body.block_size=Number($("amBlock").value);
+    if($("amSeed").value.trim())body.seed=$("amSeed").value;
+    const r=await api(`/api/trials/${$("trial").value}/amendments`,"POST",body);
+    $("out").textContent=`已提交修订 #${r.id}（第 ${r.version_no} 版，待复核；复核期间现场继续使用当前随机表）`;
+    loadAll();
+  }catch(e){$("out").textContent="错误："+e.message}
+}
+async function approveAmendment(){
+  try{
+    const r=await api(`/api/amendments/${$("amId").value}/approve`,"POST",{});
+    $("out").textContent=r.status==="active"
+      ?`修订 #${r.id} 已通过双人复核并生效（${r.protocol_version}），仅后续入组切换`
+      :`修订 #${r.id} 已完成一审（${r.first_approver}），等待第二位统计人员确认`;
+    loadAll();
+  }catch(e){$("out").textContent="错误："+e.message}
+}
+async function rejectAmendment(){
+  try{
+    const r=await api(`/api/amendments/${$("amId").value}/reject`,"POST",{reason:$("amReject").value});
+    $("out").textContent=`修订 #${r.id} 已驳回作废（处理人：${r.rejected_by}）`;
+    loadAll();
+  }catch(e){$("out").textContent="错误："+e.message}
+}
+</script></body></html>
