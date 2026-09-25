@@ -1,4 +1,71 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>临床试验随机化</title>
-<style>body{font:16px system-ui;max-width:980px;margin:32px auto;padding:0 16px}select,button{padding:8px;margin:4px}pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}.panel{border:1px solid #bbb;padding:16px;border-radius:8px}</style></head>
-<body><h1>临床试验随机分配与盲法</h1><div class="panel"><select id="user"><option>site1</option><option>site2</option><option>coord</option><option>monitor1</option><option>monitor2</option></select><input id="trial" value="1"><button onclick="load()">查看试验摘要</button></div><pre id="out"></pre>
-<script>async function load(){const r=await fetch(`/api/trials/${trial.value}/summary`,{headers:{"X-User-Id":user.value}});out.textContent=JSON.stringify(await r.json(),null,2)}</script></body></html>
+<style>
+body{font:16px system-ui;max-width:1080px;margin:32px auto;padding:0 16px}
+select,button,input{padding:8px;margin:4px}
+pre{background:#f4f4f4;padding:12px;white-space:pre-wrap}
+.panel{border:1px solid #bbb;padding:16px;border-radius:8px;margin-bottom:16px}
+table{border-collapse:collapse;width:100%;font-size:14px}
+td,th{border:1px solid #ccc;padding:6px 8px;text-align:left;vertical-align:top}
+tr.active{background:#e8f5e9}tr.pending{background:#fff8e1}tr.rejected{background:#fdecea}tr.superseded{background:#eceff1}
+.muted{color:#777;font-size:14px}
+</style></head>
+<body>
+<h1>临床试验随机分配与盲法</h1>
+<div class="panel">
+  <label>用户 <select id="user"><option>site1</option><option>site2</option><option>coord</option><option>monitor1</option><option>monitor2</option><option>stat1</option><option>stat2</option></select></label>
+  <label>试验 <input id="trial" value="1" size="4"></label>
+  <button onclick="loadSummary()">查看试验摘要</button>
+  <button onclick="loadHistory()">查看版本沿革</button>
+</div>
+<div class="panel">
+  <h2>提交方案修订（协调员）</h2>
+  <input id="pv" placeholder="新版本号，如 v2.0">
+  <input id="reason" placeholder="修订原因（至少 8 字）" size="32">
+  <input id="newArms" placeholder="试验组逗号分隔，留空沿用" size="22">
+  <input id="blockSize" placeholder="区组长度，留空沿用" size="14">
+  <input id="newSeed" placeholder="新随机种子，留空沿用" size="16">
+  <button onclick="submitAmendment()">提交修订</button>
+  <div class="muted">复核期间现场继续使用当前随机表；待审方案不生成随机表、不提前占用编号。两名统计人员先后确认后，仅后续入组切换到新方案。</div>
+</div>
+<div class="panel"><h2>版本沿革</h2><div id="hist" class="muted">尚未加载</div></div>
+<pre id="out"></pre>
+<script>
+const hdr=()=>({"X-User-Id":user.value,"Content-Type":"application/json"});
+const esc=s=>String(s??"").replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+const STATUS={active:"生效中",pending:"待复核",rejected:"已驳回",superseded:"已替换"};
+async function loadSummary(){const r=await fetch(`/api/trials/${trial.value}/summary`,{headers:hdr()});out.textContent=JSON.stringify(await r.json(),null,2)}
+async function loadHistory(){
+  const r=await fetch(`/api/trials/${trial.value}/amendments`,{headers:hdr()});
+  const d=await r.json();
+  if(!d.items){hist.textContent=JSON.stringify(d);return}
+  hist.innerHTML=renderTable(d.items);
+  out.textContent=JSON.stringify(d,null,2);
+}
+function renderTable(items){
+  const rows=items.map(v=>{
+    const review=[v.first_reviewer&&`一审 ${esc(v.first_reviewer)}`,v.second_reviewer&&`二审 ${esc(v.second_reviewer)}`].filter(Boolean).join("<br>");
+    const handled=v.status==="rejected"?`驳回人 ${esc(v.rejected_by)}<br>${esc(v.reject_reason)}`:(v.effective_at?`生效 ${esc(v.effective_at)}`:"");
+    const ops=v.status==="pending"?`<button onclick="confirmAmendment(${v.id})">统计确认</button><button onclick="rejectAmendment(${v.id})">驳回</button>`:"";
+    const arms=v.arms?esc(v.arms.join(" / ")):"（对中心保密）";
+    return `<tr class="${v.status}"><td>v${v.version_no}</td><td>${esc(v.protocol_version)}</td><td>${STATUS[v.status]||esc(v.status)}</td><td>${arms}</td><td>${esc(v.submitted_by)}<br>${esc(v.reason)}</td><td>${review}</td><td>${handled}</td><td>${ops}</td></tr>`;
+  }).join("");
+  return `<table><tr><th>版本</th><th>方案号</th><th>状态</th><th>试验组</th><th>提交人/原因</th><th>统计复核</th><th>处理</th><th>操作</th></tr>${rows}</table>`;
+}
+async function submitAmendment(){
+  const body={protocol_version:pv.value,reason:reason.value};
+  if(newArms.value.trim())body.arms=newArms.value.split(/[,，]/).map(s=>s.trim()).filter(Boolean);
+  if(blockSize.value.trim())body.block_size=Number(blockSize.value);
+  if(newSeed.value.trim())body.seed=newSeed.value.trim();
+  const r=await fetch(`/api/trials/${trial.value}/amendments`,{method:"POST",headers:hdr(),body:JSON.stringify(body)});
+  out.textContent=JSON.stringify(await r.json(),null,2);loadHistory();
+}
+async function confirmAmendment(id){
+  const r=await fetch(`/api/amendments/${id}/confirm`,{method:"POST",headers:hdr()});
+  out.textContent=JSON.stringify(await r.json(),null,2);loadHistory();
+}
+async function rejectAmendment(id){
+  const text=prompt("驳回理由（至少 8 字）");if(!text)return;
+  const r=await fetch(`/api/amendments/${id}/reject`,{method:"POST",headers:hdr(),body:JSON.stringify({reason:text})});
+  out.textContent=JSON.stringify(await r.json(),null,2);loadHistory();
+}
+</script></body></html>
